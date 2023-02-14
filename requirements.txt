@@ -1,0 +1,3 @@
+-f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+jax==0.2.19
+jaxlib==0.1.73+cuda11.cudnn82

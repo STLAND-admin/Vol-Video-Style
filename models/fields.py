@@ -2,11 +2,11 @@ import torch
 import torch.nn as nn
 import numpy as np
 from models.embedder import get_embedder
-
+import tinycudann as tcnn
 
 
 class MLP(nn.Module):
-    def __init__(self, c_in, c_out, c_hiddens, act=nn.LeakyReLU, bn=nn.BatchNorm1d, zero_init=False):
+    def __init__(self, c_in, c_out, c_hiddens, act=nn.LeakyReLU, bn=None, zero_init=True):
         super().__init__()
         layers = []
         d_in = c_in
@@ -17,7 +17,7 @@ class MLP(nn.Module):
             layers.append(act())
             d_in = d_out
         layers.append(nn.Linear(d_in, c_out)) # nn.Conv1d(d_in, c_out, 1, 1, 0)
-        if zero_init:
+        if zero_init==True:
             nn.init.constant_(layers[-1].bias, 0.0)
             nn.init.constant_(layers[-1].weight, 0.0)
         self.mlp = nn.Sequential(*layers)
@@ -226,6 +226,58 @@ def quaternions_to_rotation_matrices(quaternions):
 
 
 # Deform
+
+class DeformNetwork_MLP(nn.Module):
+    def __init__(self,
+                 d_feature,
+                 d_in,
+                 d_out_1,
+                 d_out_2,
+                 n_blocks,
+                 d_hidden,
+                 n_layers,
+                 skip_in=(4,),
+                 multires=0,
+                 weight_norm=True,
+                 normalizing_flow = False):
+        super(DeformNetwork_MLP, self).__init__()
+        
+        self.n_blocks = n_blocks
+        self.skip_in = skip_in
+
+        # part a
+        # xy -> z
+        ori_in = d_in
+        dims_in = ori_in
+        dims = [dims_in + d_feature] + [d_hidden for _ in range(n_layers)] + [d_out_1]
+
+        self.embed_fn_1 = None
+
+        if multires > 0:
+            embed_fn, input_ch = get_embedder(multires, input_dims=dims_in)
+            self.embed_fn_1 = embed_fn
+            dims_in = input_ch
+            dims[0] = input_ch + d_feature
+
+        
+
+        # latent code
+        self.deform = MLP(c_in = dims[0], c_out=3, c_hiddens=dims, bn=None)
+
+        self.activation = nn.Softplus(beta=100)
+
+
+    def forward(self, deformation_code, input_pts, alpha_ratio):
+        batch_size = input_pts.shape[0]
+        x = input_pts
+        x = self.embed_fn_1(x, alpha_ratio)
+        x = torch.cat([deformation_code.repeat(x.shape[0],1), x], 1)
+        translate = self.deform(x)
+        return input_pts + translate
+
+    def inverse(self, deformation_code, input_pts, alpha_ratio):
+        return torch.zeros_like(input_pts).to(input_pts)
+
 class DeformNetwork(nn.Module):
     def __init__(self,
                  d_feature,
@@ -237,7 +289,8 @@ class DeformNetwork(nn.Module):
                  n_layers,
                  skip_in=(4,),
                  multires=0,
-                 weight_norm=True):
+                 weight_norm=True,
+                 normalizing_flow = True):
         super(DeformNetwork, self).__init__()
         
         self.n_blocks = n_blocks
@@ -523,9 +576,11 @@ class TopoNetwork(nn.Module):
                  skip_in=(4,),
                  multires=0,
                  bias=0.5,
-                 weight_norm=True):
+                 weight_norm=True,
+                 isuse = True
+                ):
         super(TopoNetwork, self).__init__()
-        
+        self.isuse = isuse
         dims_in = d_in
         dims = [d_in + d_feature] + [d_hidden for _ in range(n_layers)] + [d_out]
 
@@ -586,11 +641,54 @@ class TopoNetwork(nn.Module):
 
             if l < self.num_layers - 2:
                 x = self.activation(x)
-
+        if self.isuse == False:
+            x = torch.zeros_like(x).to(x)
         return x
 
 
-# Deform
+class NGPNetwork(nn.Module):
+    def __init__(self,
+                 weight_norm=True,
+                 multires_view=0,
+                 squeeze_out=True):
+        super().__init__()
+        per_level_scale = np.exp2(np.log2(2048 * 1 / 16) / (16 - 1))
+
+        self.encoder = tcnn.Encoding(
+            n_input_dims=3,
+            encoding_config={
+                "otype": "HashGrid",
+                "n_levels": 8,
+                "n_features_per_level": 2,
+                "log2_hashmap_size": 19,
+                "base_resolution": 16,
+                "per_level_scale": per_level_scale,
+            },
+        )
+        dims = [16] + [32 for _ in range(2)] + [3]
+
+
+
+        # latent code
+        self.color_net = MLP(c_in = dims[0], c_out=3, c_hiddens=dims, bn=None, zero_init=True)
+        # self.color_net = tcnn.Network(
+        #     n_input_dims=8,
+        #     n_output_dims=3,
+        #     network_config={
+        #         "otype": "FullyFusedMLP",
+        #         "activation": "ReLU",
+        #         "output_activation": "None",
+        #         "n_neurons": 64,
+        #         "n_hidden_layers": 2,
+        #     },
+        # )
+
+
+
+    def forward(self, points):
+        color = self.color_net(self.encoder(points/np.pi))
+        return color
+
 class AppearanceNetwork(nn.Module):
     def __init__(self,
                  d_feature,
@@ -607,29 +705,30 @@ class AppearanceNetwork(nn.Module):
 
         self.mode = mode
         self.squeeze_out = squeeze_out
-        dims = [d_in + d_feature + d_global_feature] + [d_hidden for _ in range(n_layers)] + [d_out]
+        dims = [6 + 16 + d_feature + d_global_feature] + [d_hidden for _ in range(n_layers)] + [d_out]
+        per_level_scale = np.exp2(np.log2(2048 * 1 / 16) / (16 - 1))
 
+        self.encoder = tcnn.Encoding(
+            n_input_dims=3,
+            encoding_config={
+                "otype": "HashGrid",
+                "n_levels": 8,
+                "n_features_per_level": 2,
+                "log2_hashmap_size": 19,
+                "base_resolution": 16,
+                "per_level_scale": per_level_scale,
+            },
+        )
         self.embedview_fn = None
         if multires_view > 0:
             embedview_fn, input_ch = get_embedder(multires_view)
             self.embedview_fn = embedview_fn
             dims[0] += (input_ch - 3)
 
-        self.num_layers = len(dims)
-
-        for l in range(0, self.num_layers - 1):
-            out_dim = dims[l + 1]
-            lin = nn.Linear(dims[l], out_dim)
-
-            if weight_norm:
-                lin = nn.utils.weight_norm(lin)
-
-            setattr(self, "lin" + str(l), lin)
-
-        self.relu = nn.ReLU()
+        self.color_net = MLP(c_in = dims[0], c_out=3, c_hiddens=dims, bn=None, zero_init=False)
 
 
-    def forward(self, global_feature, points, normals, view_dirs, feature_vectors, alpha_ratio):
+    def forward(self, global_feature, points, normals, view_dirs, feature_vectors, alpha_ratio, ngp_color=None):
         if self.embedview_fn is not None:
             # Anneal
             view_dirs = self.embedview_fn(view_dirs, alpha_ratio)
@@ -638,25 +737,89 @@ class AppearanceNetwork(nn.Module):
 
         global_feature = global_feature.repeat(points.shape[0],1)
         if self.mode == 'idr':
-            rendering_input = torch.cat([points, view_dirs, normals, feature_vectors, global_feature], dim=-1)
+            rendering_input = torch.cat([view_dirs, normals, feature_vectors, global_feature], dim=-1)
         elif self.mode == 'no_view_dir':
-            rendering_input = torch.cat([points, normals, feature_vectors, global_feature], dim=-1)
+            rendering_input = torch.cat([normals, feature_vectors, global_feature], dim=-1)
         elif self.mode == 'no_normal':
-            rendering_input = torch.cat([points, view_dirs, feature_vectors, global_feature], dim=-1)
-
-        x = rendering_input
-
-        for l in range(0, self.num_layers - 1):
-            lin = getattr(self, "lin" + str(l))
-
-            x = lin(x)
-
-            if l < self.num_layers - 2:
-                x = self.relu(x)
-
+            rendering_input = torch.cat([view_dirs, feature_vectors, global_feature], dim=-1)
+        points = self.encoder(points/3)
+        x =  torch.cat([rendering_input, points], dim=-1)
+        x = self.color_net(x)
+       
         if self.squeeze_out:
-            x = torch.sigmoid(x)
+            x = (torch.tanh(x) +1)/2
         return x
+
+
+# class AppearanceNetwork(nn.Module):
+#     def __init__(self,
+#                  d_feature,
+#                  d_global_feature,
+#                  mode,
+#                  d_in,
+#                  d_out,
+#                  d_hidden,
+#                  n_layers,
+#                  weight_norm=True,
+#                  multires_view=0,
+#                  squeeze_out=True):
+#         super().__init__()
+
+#         self.mode = mode
+#         self.squeeze_out = squeeze_out
+#         dims = [d_in + d_feature + d_global_feature] + [d_hidden for _ in range(n_layers)] + [d_out]
+
+#         self.embedview_fn = None
+#         if multires_view > 0:
+#             embedview_fn, input_ch = get_embedder(multires_view)
+#             self.embedview_fn = embedview_fn
+#             dims[0] += (input_ch - 3)
+
+#         self.num_layers = len(dims)
+
+#         for l in range(0, self.num_layers - 1):
+#             out_dim = dims[l + 1]
+#             lin = nn.Linear(dims[l], out_dim)
+
+#             if weight_norm:
+#                 lin = nn.utils.weight_norm(lin)
+
+#             setattr(self, "lin" + str(l), lin)
+
+#         self.relu = nn.ReLU()
+
+
+#     def forward(self, global_feature, points, normals, view_dirs, feature_vectors, alpha_ratio, ngp_color=None):
+#         if self.embedview_fn is not None:
+#             # Anneal
+#             view_dirs = self.embedview_fn(view_dirs, alpha_ratio)
+
+#         rendering_input = None
+
+#         global_feature = global_feature.repeat(points.shape[0],1)
+#         if self.mode == 'idr':
+#             rendering_input = torch.cat([points, view_dirs, normals, feature_vectors, global_feature], dim=-1)
+#         elif self.mode == 'no_view_dir':
+#             rendering_input = torch.cat([points, normals, feature_vectors, global_feature], dim=-1)
+#         elif self.mode == 'no_normal':
+#             rendering_input = torch.cat([points, view_dirs, feature_vectors, global_feature], dim=-1)
+
+#         x = rendering_input
+
+#         for l in range(0, self.num_layers - 1):
+#             lin = getattr(self, "lin" + str(l))
+
+#             x = lin(x)
+
+#             if l < self.num_layers - 2:
+#                 x = self.relu(x)
+       
+#         if self.squeeze_out:
+#             x = torch.sigmoid(x)
+#             if ngp_color is not None:
+#                 color = torch.tanh(ngp_color(points))
+#                 x = x+color
+#         return x
 
 
 class SDFNetwork(nn.Module):

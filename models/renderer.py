@@ -81,7 +81,8 @@ class DeformNeuSRenderer:
                  important_begin_iter,
                  n_importance,
                  up_sample_steps,
-                 perturb):
+                 perturb,
+                 ngp_color = None):
         self.dtype = torch.get_default_dtype()
         # Deform
         self.deform_network = deform_network
@@ -97,7 +98,7 @@ class DeformNeuSRenderer:
         self.up_sample_steps = up_sample_steps
         self.perturb = perturb
         self.report_freq = report_freq
-
+        self.ngp_color = ngp_color
 
     def update_samples_num(self, iter_step, alpha_ratio=0.):
         if iter_step >= self.important_begin_iter:
@@ -261,10 +262,9 @@ class DeformNeuSRenderer:
         gradients_o, pts_jacobian = gradient(deform_network, ambient_network, sdf_network, deform_code, pts, alpha_ratio)
         dirs_c = torch.bmm(pts_jacobian, dirs_o.unsqueeze(-1)).squeeze(-1) # view in observation space
         dirs_c = dirs_c / torch.linalg.norm(dirs_c, ord=2, dim=-1, keepdim=True)
-        
         sampled_color = color_network(appearance_code, pts_canonical, gradients_o, \
-            dirs_c, feature_vector, alpha_ratio).reshape(batch_size, n_samples, 3)
-
+            dirs_c, feature_vector, alpha_ratio, ngp_color = self.ngp_color).reshape(batch_size, n_samples, 3)
+    
         inv_s = deviation_network(torch.zeros([1, 3]))[:, :1].clip(1e-6, 1e6)
         inv_s = inv_s.expand(batch_size * n_samples, 1)
 
@@ -298,7 +298,6 @@ class DeformNeuSRenderer:
         depth_map = torch.sum(weights * mid_z_vals, -1, keepdim=True)
 
         color = (sampled_color * weights[:, :, None]).sum(dim=1)
-
         # Eikonal loss, observation + canonical
         gradient_o_error = (torch.linalg.norm(gradients_o.reshape(batch_size, n_samples, 3), ord=2,
                                             dim=-1) - 1.0) ** 2
@@ -469,7 +468,7 @@ class DeformNeuSRenderer:
         dirs_c = torch.bmm(pts_jacobian, rays_d.unsqueeze(-1)).squeeze(-1) # view in observation space
         dirs_c = dirs_c / torch.linalg.norm(dirs_c, ord=2, dim=-1, keepdim=True)
         color = self.color_network(appearance_code, pts_canonical, gradients_o, \
-            dirs_c, feature_vector, alpha_ratio)
+            dirs_c, feature_vector, alpha_ratio, ngp_color = self.ngp_color)
 
         return color, gradients_o
 
@@ -529,14 +528,16 @@ class DeformNeuSRenderer:
 
     
     def extract_observation_geometry(self, deform_code, bound_min, bound_max, resolution, threshold=0.0, alpha_ratio=0.0):
-        return extract_geometry(bound_min,
+        vertices, faces =  extract_geometry(bound_min,
                                 bound_max,
                                 resolution=resolution,
                                 threshold=threshold,
                                 query_func=lambda pts: -self.sdf_network.sdf(self.deform_network(deform_code, pts,
                                                             alpha_ratio), self.ambient_network(deform_code, pts,
                                                             alpha_ratio), alpha_ratio))
-
+        return self.deform_network(deform_code, torch.from_numpy(vertices).to(deform_code),
+                                                            alpha_ratio).detach().cpu().numpy(), faces
+        # return  vertices, faces
 
 class NeuSRenderer:
     def __init__(self,
@@ -648,7 +649,7 @@ class NeuSRenderer:
         feature_vector = sdf_nn_output[:, 1:]
 
         gradients = sdf_network.gradient(pts)
-        sampled_color = color_network(pts, gradients, dirs, feature_vector).reshape(batch_size, n_samples, 3)
+        sampled_color = color_network(pts, gradients, dirs, feature_vector).reshape(batch_size, n_samples, 3, ngp_color=self.ngp_color)
 
         inv_s = deviation_network(torch.zeros([1, 3]))[:, :1].clip(1e-6, 1e6)
         inv_s = inv_s.expand(batch_size * n_samples, 1)

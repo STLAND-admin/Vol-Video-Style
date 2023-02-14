@@ -1,0 +1,1 @@
+python -u exp_runner.py --mode train --paint --conf ./confs/kfusion_snoopy_woab.conf   --is_continue --case kfusion_snoopy_paint  --gpu 2 --woab
