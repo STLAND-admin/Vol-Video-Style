@@ -23,7 +23,7 @@ from typing import Callable, Optional, Union
 import cv2
 import numpy as np
 
-from dycheck.utils import image
+from models.utils import image
 
 from .skeleton import SKELETON_MAP, Skeleton
 

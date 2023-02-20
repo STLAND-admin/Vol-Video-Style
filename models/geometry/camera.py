@@ -20,11 +20,10 @@
 import copy
 from typing import Optional, Tuple, Union
 
-import gin
 import jax.numpy as jnp
 import numpy as np
 
-from dycheck.utils import io, struct, types
+from models.utils import io, struct, types
 
 from . import utils
 
@@ -241,7 +240,6 @@ def project(
         return pixels, depths
 
 
-@gin.configurable()
 class Camera(object):
     """A generic camera class that potentially distorts rays.
 
@@ -300,7 +298,7 @@ class Camera(object):
             tangential_distortion, np.float32
         )
 
-        self.use_center = use_center
+        self.use_center = True
         self.use_projective_depth = use_projective_depth
 
     @classmethod

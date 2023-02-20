@@ -20,7 +20,6 @@
 from typing import NamedTuple, Optional
 
 import flax
-import gin
 import jax.numpy as jnp
 
 from . import types
@@ -69,11 +68,10 @@ class TrainScalars(object):
     dist: float = 0
 
 
-@gin.configurable()
 @flax.struct.dataclass
 class TrainSchedules(object):
     # Training parameters for the losses.
-    lr_sched: types.ScheduleType = gin.REQUIRED
+    # lr_sched: types.ScheduleType = gin.REQUIRED
     bkgd_sched: Optional[types.ScheduleType] = None
     depth_sched: Optional[types.ScheduleType] = None
     dist_sched: Optional[types.ScheduleType] = None

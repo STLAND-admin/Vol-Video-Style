@@ -28,7 +28,7 @@ import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.collections import PolyCollection
 
-from dycheck import geometry
+from models import geometry
 
 from .. import image
 

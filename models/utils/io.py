@@ -20,18 +20,35 @@
 import json
 import os.path as osp
 import pickle as pkl
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Literal,
-    Optional,
-    Sequence,
-    Tuple,
-    Union,
-)
-
+try:
+    
+    from typing import (
+        Any,
+        Callable,
+        Dict,
+        List,
+        Literal,
+        Optional,
+        Sequence,
+        Tuple,
+        Union,
+    )
+except:
+    from typing_extensions  import (
+        Literal,
+    
+    )
+    from typing import (
+        Any,
+        Callable,
+        Dict,
+        List,
+        Optional,
+        Sequence,
+        Tuple,
+        Union,
+    )
+    
 import cv2
 import ffmpeg
 import numpy as np

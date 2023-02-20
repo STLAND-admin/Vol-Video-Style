@@ -20,16 +20,16 @@
 import re
 from typing import Callable, Optional, Sequence, Tuple, Union
 
-import gin
+# import gin
 import numpy as np
 from matplotlib import cm
 
-from dycheck.utils import image
+from models.utils import image
 
 KP_PALETTE_MAP = {}
 
 
-@gin.configurable()
+# @gin.configurable()
 class Skeleton(object):
     name = "skeleton"
     _anonymous_kp_name = "ANONYMOUS KP"
@@ -123,7 +123,7 @@ class Skeleton(object):
         return np.delete(self.palette.copy(), self.root_idx, axis=0).tolist()
 
 
-@gin.configurable()
+# @gin.configurable()
 class UnconnectedSkeleton(Skeleton):
     """A keypoint skeleton that does not define parents. This could be useful
     when organizing randomly annotated keypoints.
@@ -146,7 +146,7 @@ class UnconnectedSkeleton(Skeleton):
         )
 
 
-@gin.configurable()
+# @gin.configurable()
 class HumanSkeleton(Skeleton):
     """A human skeleton following the COCO dataset.
 
@@ -224,7 +224,7 @@ class HumanSkeleton(Skeleton):
         )
 
 
-@gin.configurable()
+# @gin.configurable()
 class QuadrupedSkeleton(Skeleton):
     """A quadruped skeleton following StanfordExtra dataset.
 

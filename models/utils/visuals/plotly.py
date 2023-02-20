@@ -33,7 +33,7 @@ import numpy as np
 import plotly.graph_objects as go
 import trimesh
 
-from dycheck import geometry
+from models import geometry
 
 
 class AxisArgs(NamedTuple):

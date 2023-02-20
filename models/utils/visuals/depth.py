@@ -22,7 +22,7 @@ from typing import Callable, Optional, Union
 import numpy as np
 from matplotlib import cm
 
-from dycheck.utils import image
+from models.utils import image
 
 
 def visualize_depth(

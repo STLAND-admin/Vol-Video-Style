@@ -12,10 +12,12 @@ from tqdm import tqdm
 from pyhocon import ConfigFactory
 
 from models.dataset import Dataset, Dataset_nv
-from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, DeformNetwork, NGPNetwork, AppearanceNetwork, TopoNetwork, DeformNetwork_MLP, NeRFNetwork
-from models.renderer import NeuSRenderer, DeformNeuSRenderer
+from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, DeformNetwork, NGPNetwork, AppearanceNetwork, TopoNetwork, DeformNetwork_MLP
+from models.renderer import NeuSRenderer
+from models.dyrenderer import DeformNeusRenderer_dycheck as DeformNeusRenderer
 from models.dataset_hyper import iPhoneDatasetFromAllFrames
-
+from torch.utils.data import DataLoader
+from models.NeRF import NerfMLP
 
 
 class Runner:
@@ -43,23 +45,26 @@ class Runner:
             self.base_exp_dir = self.base_exp_dir + '_wodepth'
         if iswoab==True: 
             self.base_exp_dir = self.base_exp_dir + '_woab'
+        self.base_exp_dir = self.base_exp_dir + '_Neus'
         self.pre_image = 0
         os.makedirs(self.base_exp_dir, exist_ok=True)
         if self.hyper == False:
             self.dataset = Dataset(self.conf['dataset'])
         else:
-            if dataset == 'hypernerf':
+            if dataset != 'dycheck':
                 self.dataset = iPhoneDatasetFromAllFrames(self.conf['dataset'], split = 'train_intl', use_depth = False)
             else:
                 self.dataset = iPhoneDatasetFromAllFrames(self.conf['dataset'], split = 'train')
 
+      
+            
         assert iswoab != self.conf.get_bool('model.topo_network.isuse')
         if is_paint ==True:
             self.conf['dataset']['data_dir'] = self.conf['dataset']['data_dir'].replace('_paint', '')
             if self.hyper == False:
                 self.dataset_val = Dataset(self.conf['dataset'])
             else:
-                if dataset == 'hypernerf':
+                if dataset != 'dycheck':
                     self.dataset_val = iPhoneDatasetFromAllFrames(self.conf['dataset'], split = 'val_intl', use_depth = False)
                 else:
                     self.dataset_val = iPhoneDatasetFromAllFrames(self.conf['dataset'], split = 'train')
@@ -67,7 +72,7 @@ class Runner:
             if self.hyper == False:
                 self.dataset_val = Dataset(self.conf['dataset'])
             else:
-                if dataset == 'hypernerf':
+                if dataset != 'dycheck':
                     self.dataset_val = iPhoneDatasetFromAllFrames(self.conf['dataset'], split = 'val_intl', use_depth = False)
                 else:
                     self.dataset_val = iPhoneDatasetFromAllFrames(self.conf['dataset'], split = 'train')
@@ -75,8 +80,8 @@ class Runner:
         if self.hyper == False:
             self.dataset_nv = Dataset_nv(self.conf['dataset'])
         else:
-            if dataset == 'hypernerf':
-                self.dataset_nv = iPhoneDatasetFromAllFrames(self.conf['dataset'], split = 'train_intl', use_depth = False)
+            if dataset != 'dycheck':
+                self.dataset_nv = iPhoneDatasetFromAllFrames(self.conf['dataset'], split = 'val_intl', use_depth = False)
             else:
                 self.dataset_nv = iPhoneDatasetFromAllFrames(self.conf['dataset'], split = 'train')
 
@@ -86,9 +91,11 @@ class Runner:
         self.use_deform = self.conf.get_bool('train.use_deform')
         if self.use_deform:
             self.deform_dim = self.conf.get_int('model.deform_network.d_feature')
-            self.deform_codes = torch.randn(self.dataset.n_images, self.deform_dim, requires_grad=True).to(self.device)
+            self.deform_codes = torch.nn.Embedding(self.dataset.n_images, self.deform_dim) #torch.randn(self.dataset.n_images, self.deform_dim, requires_grad=True).to(self.device)
+            self.deform_codes.weight = torch.nn.init.uniform_(self.deform_codes.weight, b = 0.05)
+
             self.appearance_dim = self.conf.get_int('model.appearance_rendering_network.d_global_feature')
-            self.appearance_codes = torch.randn(self.dataset.n_images, self.appearance_dim, requires_grad=True).to(self.device)
+            self.appearance_codes = torch.nn.Embedding(self.dataset.n_images, self.appearance_dim) #torch.randn(self.dataset.n_images, self.appearance_dim, requires_grad=True).to(self.device)
 
         # Training parameters
         self.end_iter = self.conf.get_int('train.end_iter')
@@ -103,7 +110,7 @@ class Runner:
         self.val_freq = self.conf.get_int('train.val_freq')
 
         self.val_mesh_freq = self.conf.get_int('train.val_mesh_freq')
-        self.validate_idx = self.conf.get_int('train.validate_idx', default=-1)
+        self.validate_idx = 0
         self.batch_size = self.conf.get_int('train.batch_size')
         self.validate_resolution_level = self.conf.get_int('train.validate_resolution_level')
         self.learning_rate = self.conf.get_float('train.learning_rate')
@@ -138,7 +145,6 @@ class Runner:
         self.sdf_network = SDFNetwork(**self.conf['model.sdf_network']).to(self.device)
 
         self.deviation_network = SingleVarianceNetwork(**self.conf['model.variance_network']).to(self.device)
-        # Deform
         if self.use_deform:
             if self.is_paint==False:
                 self.color_network = AppearanceNetwork(**self.conf['model.appearance_rendering_network']).to(self.device)
@@ -152,7 +158,7 @@ class Runner:
         # Deform
         if self.use_deform:
             if self.is_paint == True:
-                self.renderer = DeformNeuSRenderer(self.report_freq,
+                self.renderer = DeformNeusRenderer(self.report_freq,
                                         self.deform_network,
                                         self.topo_network,
                                         self.sdf_network,
@@ -161,7 +167,7 @@ class Runner:
                                         ngp_color = self.ngp_color,
                                         **self.conf['model.neus_renderer'])
             else:
-                self.renderer = DeformNeuSRenderer(self.report_freq,
+                self.renderer = DeformNeusRenderer(self.report_freq,
                                         self.deform_network,
                                         self.topo_network,
                                         self.sdf_network,
@@ -171,7 +177,7 @@ class Runner:
         else:
             self.renderer = NeuSRenderer(self.sdf_network,
                                         self.deviation_network,
-                                        self.color_network,
+                                        # self.color_network,
                                         **self.conf['model.neus_renderer'])
 
         # Load Optimizer
@@ -180,8 +186,8 @@ class Runner:
             if self.use_deform:
                 params_to_train += [{'name':'deform_network', 'params':self.deform_network.parameters(), 'lr':self.learning_rate}]
                 params_to_train += [{'name':'topo_network', 'params':self.topo_network.parameters(), 'lr':self.learning_rate}]
-                params_to_train += [{'name':'deform_codes', 'params':self.deform_codes, 'lr':self.learning_rate}]
-                params_to_train += [{'name':'appearance_codes', 'params':self.appearance_codes, 'lr':self.learning_rate}]
+                params_to_train += [{'name':'deform_codes', 'params':self.deform_codes.parameters(), 'lr':self.learning_rate}]
+                params_to_train += [{'name':'appearance_codes', 'params':self.appearance_codes.parameters(), 'lr':self.learning_rate}]
             params_to_train += [{'name':'sdf_network', 'params':self.sdf_network.parameters(), 'lr':self.learning_rate}]
             params_to_train += [{'name':'deviation_network', 'params':self.deviation_network.parameters(), 'lr':self.learning_rate}]
             params_to_train += [{'name':'color_network', 'params':self.color_network.parameters(), 'lr':self.learning_rate}]
@@ -244,7 +250,15 @@ class Runner:
         # if is_paint == True:
         #     self.base_exp_dir = self.base_exp_dir + '_paint'
         # os.makedirs(self.base_exp_dir, exist_ok=True)
+        res_step = self.end_iter - self.iter_step
 
+        self.dataset.len = res_step
+        self.dataset.batch_size = self.batch_size
+        self.train_loader = DataLoader(dataset=self.dataset,
+                          batch_size=1,
+                          num_workers=4,
+                          generator=torch.Generator(device='cuda'),
+                          shuffle=True)
     def train(self):
         self.writer = SummaryWriter(log_dir=os.path.join(self.base_exp_dir, 'logs'))
         if self.is_paint == False:
@@ -252,31 +266,35 @@ class Runner:
         res_step = self.end_iter - self.iter_step
         image_perm = self.get_image_perm()
         # self.validate_all_image(resolution_level=1)
-
-        for iter_i in tqdm(range(res_step)):
-            # Deform
-            if self.use_deform:
+        with tqdm(total=len(self.train_loader)) as t:
+            for iter_i, data in enumerate(self.train_loader):
+                # Deform
+                
                 image_idx = image_perm[self.iter_step % len(image_perm)]
                 # Deform
-                deform_code = self.deform_codes[image_idx][None, ...]
                 if iter_i == 0:
                     print('The files will be saved in:', self.base_exp_dir)
                     print('Used GPU:', self.gpu)
-                    self.validate_observation_mesh(self.validate_idx)
+                self.iter_step += 1
+
+                    # self.validate_observation_mesh(self.validate_idx)
                 # Depth
-                if self.use_depth:
-                    if self.is_paint == False:
-                        data = self.dataset.gen_random_rays_at_depth(image_idx, self.batch_size)
-                    else:
-                        data = self.dataset.gen_random_rays_at_depth_paint(image_idx, self.batch_size)
-                    rays_o, rays_d, rays_s, rays_l, true_rgb, mask = \
-                        data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10], data[:, 10: 13], data[:, 13: 14]
-                else:
-                    data = self.dataset.gen_random_rays_at(image_idx, self.batch_size)
-                    rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
+                # if self.use_depth:
+                    # if self.is_paint == False:
+                    #     data = self.dataset.gen_random_rays_at_depth(image_idx, self.batch_size)
+                    # else:
+                    #     data = self.dataset.gen_random_rays_at_depth_paint(image_idx, self.batch_size)
+                    # rays_o, rays_d, rays_s, rays_l, true_rgb, mask = \
+                    #     data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10], data[:, 10: 13], data[:, 13: 14]
+                # else:
+                #     data = self.dataset.gen_random_rays_at(image_idx, self.batch_size)
+                data = data.to(self.device)[0]
+                rays_o, rays_d, true_rgb, mask, time_id = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10], data[:, -1:]
 
                 # Deform
-                appearance_code = self.appearance_codes[image_idx][None, ...]
+                deform_code = self.deform_codes#[time_id.long()][None, ...]
+
+                appearance_code = self.appearance_codes#[time_id.long()][None, ...]
                 # Anneal
                 alpha_ratio = max(min(self.iter_step/self.max_pe_iter, 1.), 0.)
                 near, far = self.dataset.near_far_from_sphere(rays_o, rays_d, self.hyper)
@@ -286,51 +304,44 @@ class Runner:
                     mask = torch.ones_like(mask)
                 mask_sum = mask.sum() + 1e-5
                 
-                render_out = self.renderer.render(deform_code, appearance_code, rays_o, rays_d, near, far,
+                render_out = self.renderer.render(time_id.long(), deform_code, appearance_code, rays_o, rays_d, near, far,
                                                 cos_anneal_ratio=self.get_cos_anneal_ratio(),
                                                 alpha_ratio=alpha_ratio, iter_step=self.iter_step)
                 # Depth
-                if self.use_depth:
-                    sdf_loss, angle_loss, valid_depth_region =\
-                        self.renderer.errorondepth(deform_code, rays_o, rays_d, rays_s, mask,
-                                            alpha_ratio, iter_step=self.iter_step)
+                
                 color_fine = render_out['color_fine']
                 s_val = render_out['s_val']
-                cdf_fine = render_out['cdf_fine']
                 gradient_o_error = render_out['gradient_o_error']
                 weight_max = render_out['weight_max']
                 weight_sum = render_out['weight_sum']
                 depth_map = render_out['depth_map']
 
                 # Loss
-                color_error = (color_fine - true_rgb) * mask
-                color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum') / mask_sum
+                eikonal_loss = gradient_o_error
+                color_error = (color_fine - true_rgb)  ** 2 * mask
+                color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum')/ (mask_sum * 3)
                 psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
 
-                eikonal_loss = gradient_o_error
-
-                mask_loss = F.binary_cross_entropy(weight_sum.clip(1e-5, 1.0 - 1e-5), mask)
+                # mask_loss = F.binary_cross_entropy(weight_sum.clip(1e-5, 1.0 - 1e-5), mask)
                 # Depth
                 if self.use_depth:
-                    valid_depth_region = (rays_l > 9).float() * valid_depth_region
-                    depth_minus = (depth_map - rays_l) * valid_depth_region
-                    depth_loss = F.l1_loss(depth_minus, torch.zeros_like(depth_minus), reduction='sum') \
-                                    / (valid_depth_region.sum() + 1e-5)
+                    depth_minus = (depth_map - rays_l) 
+                    depth_loss = F.l1_loss(depth_minus, torch.zeros_like(depth_minus), reduction='mean')
                     if self.iter_step < self.important_begin_iter:
                         rgb_scale = 0.1
                         geo_scale = 10.0
                         regular_scale = 10.0
-                        geo_loss = sdf_loss
+                        geo_loss = depth_loss
                     elif self.iter_step < self.max_pe_iter:
                         rgb_scale = 1.0
                         geo_scale = 1.0
                         regular_scale = 10.0
-                        geo_loss = 0.5 * (depth_loss + sdf_loss)
+                        geo_loss = 0.5 * depth_loss
                     else:
                         rgb_scale = 1.0
                         geo_scale = 0.1
                         regular_scale = 1.0
-                        geo_loss = 0.5 * (depth_loss + sdf_loss)
+                        geo_loss = 0.5 * depth_loss
                 else:
                     if self.iter_step < self.max_pe_iter:
                         regular_scale = 10.0
@@ -339,11 +350,11 @@ class Runner:
                 
                 if self.use_depth:
                     loss = color_fine_loss * rgb_scale +\
-                        (geo_loss * self.geo_weight + angle_loss * self.angle_weight) * geo_scale +\
-                        (eikonal_loss * self.igr_weight + mask_loss * self.mask_weight) * regular_scale
+                        (geo_loss * self.geo_weight + angle_loss * self.angle_weight) * geo_scale# +\
+                        # (mask_loss * self.mask_weight) * regular_scale
                 else:
-                    loss = color_fine_loss +\
-                        (eikonal_loss * self.igr_weight + mask_loss * self.mask_weight) * regular_scale
+                    loss = color_fine_loss + eikonal_loss * self.igr_weight * 0.1#+\
+                        # ( mask_loss * self.mask_weight) * regular_scale
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -360,16 +371,14 @@ class Runner:
                     del sdf_loss
                     del depth_loss
                     del angle_loss
-                self.writer.add_scalar('Loss/eikonal_loss', eikonal_loss, self.iter_step)
-                self.writer.add_scalar('Loss/mask_loss', mask_loss, self.iter_step)
-                del eikonal_loss
-                del mask_loss
+                # self.writer.add_scalar('Loss/mask_loss', mask_loss, self.iter_step)
+                # del mask_loss
 
                 self.writer.add_scalar('Statistics/s_val', s_val.mean(), self.iter_step)
-                self.writer.add_scalar('Statistics/cdf', (cdf_fine[:, :1] * mask).sum() / mask_sum, self.iter_step)
                 self.writer.add_scalar('Statistics/weight_max', (weight_max * mask).sum() / mask_sum, self.iter_step)
+                self.writer.add_scalar('Statistics/deform_codes',  list(self.deform_codes.parameters())[0].mean(), self.iter_step)
                 self.writer.add_scalar('Statistics/psnr', psnr, self.iter_step)
-                self.writer.add_scalar('Loss/parameters', list(self.color_network.parameters())[0].mean(), self.iter_step)
+                # self.writer.add_scalar('Loss/parameters', list(self.color_network.parameters())[0].mean(), self.iter_step)
                 if self.iter_step % self.report_freq == 0:
                     print('The files have been saved in:', self.base_exp_dir)
                     print('Used GPU:', self.gpu)
@@ -380,103 +389,29 @@ class Runner:
                     self.save_checkpoint()
                 if (self.iter_step % self.val_freq == 0) or ((self.iter_step-1) % 1000 == 0 and self.is_paint==True):
                     self.validate_image(self.validate_idx, resolution_level=1)
+                    self.validate_idx += 1
                     if self.is_paint == True:
                         self.validate_image(0, resolution_level=1, val=False)
 
                     # Depth
                     if self.use_depth:
                         self.validate_image_with_depth(self.validate_idx, resolution_level=1)
+                        self.validate_idx += 1
+
                         if self.is_paint == True:
                             self.validate_image_with_depth(0, resolution_level=1, val=False)
 
 
-                if self.iter_step % self.val_mesh_freq == 0:
-                    self.validate_observation_mesh(self.validate_idx)
+                # if self.iter_step % self.val_mesh_freq == 0:
+                #     self.validate_observation_mesh(self.validate_idx)
 
                 self.update_learning_rate()
                 
                 if self.iter_step % len(image_perm) == 0:
                     image_perm = self.get_image_perm()
-                self.iter_step += 1
-
-            else:
-                if self.iter_step == 0:
-                    self.validate_mesh()
-                data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
-
-                rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
-                near, far = self.dataset.near_far_from_sphere(rays_o, rays_d, self.hyper)
-
-                if self.mask_weight > 0.0:
-                    mask = (mask > 0.5).to(self.dtype)
-                else:
-                    mask = torch.ones_like(mask)
-
-                mask_sum = mask.sum() + 1e-5
-                render_out = self.renderer.render(rays_o, rays_d, near, far,
-                                                cos_anneal_ratio=self.get_cos_anneal_ratio())
-
-                color_fine = render_out['color_fine']
-                s_val = render_out['s_val']
-                cdf_fine = render_out['cdf_fine']
-                gradient_error = render_out['gradient_error']
-                weight_max = render_out['weight_max']
-                weight_sum = render_out['weight_sum']
-
-                # Loss
-                color_error = (color_fine - true_rgb) * mask
-                color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum') / mask_sum
-                psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
-
-                eikonal_loss = gradient_error
-
-                mask_loss = F.binary_cross_entropy(weight_sum.clip(1e-3, 1.0 - 1e-3), mask)
-
-                loss = color_fine_loss +\
-                    eikonal_loss * self.igr_weight +\
-                    mask_loss * self.mask_weight
-
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-
-
-                self.writer.add_scalar('Loss/loss', loss, self.iter_step)
-                self.writer.add_scalar('Loss/color_loss', color_fine_loss, self.iter_step)
-                if self.is_paint == True:
-                    logging.info("loss: {}".format(color_fine_loss.item()))
-                self.writer.add_scalar('Loss/eikonal_loss', eikonal_loss, self.iter_step)
-                del color_fine_loss
-                del eikonal_loss
-                if self.mask_weight > 0.0:
-                    self.writer.add_scalar('Loss/mask_loss', mask_loss, self.iter_step)
-                    del mask_loss
-                self.writer.add_scalar('Statistics/s_val', s_val.mean(), self.iter_step)
-                self.writer.add_scalar('Statistics/cdf', (cdf_fine[:, :1] * mask).sum() / mask_sum, self.iter_step)
-                self.writer.add_scalar('Statistics/weight_max', (weight_max * mask).sum() / mask_sum, self.iter_step)
-                self.writer.add_scalar('Statistics/psnr', psnr, self.iter_step)
-
-                if self.iter_step % self.report_freq == 0:
-                    print('The file have been saved in:', self.base_exp_dir)
-                    print('Used GPU:', self.gpu)
-                    print('iter:{:8>d} loss = {} lr={}'.format(self.iter_step, loss, self.optimizer.param_groups[0]['lr']))
-
-                if self.iter_step % self.save_freq == 0:
-                    self.save_checkpoint()
-
-                if self.iter_step % self.val_freq == 0:
-                    self.validate_image()
-
-                if self.iter_step % self.val_mesh_freq == 0:
-                    self.validate_mesh()
-
-                self.update_learning_rate()
-
-                if self.iter_step % len(image_perm) == 0:
-                    image_perm = self.get_image_perm()
+                t.set_postfix(steps=self.iter_step, psnr=psnr.item())
+                t.update(1)
                     
-                self.iter_step += 1
-
         self.save_checkpoint()
         self.validate_all_image(resolution_level=1)
 
@@ -492,14 +427,14 @@ class Runner:
 
 
     def update_learning_rate(self, scale_factor=1):
-        if self.iter_step < self.warm_up_end:
-            learning_factor = self.iter_step / self.warm_up_end
-        else:
-            alpha = self.learning_rate_alpha
-            progress = (self.iter_step - self.warm_up_end) / (self.end_iter - self.warm_up_end)
-            learning_factor = (np.cos(np.pi * progress) + 1.0) * 0.5 * (1 - alpha) + alpha
-        learning_factor *= scale_factor
-
+        # if self.iter_step < self.warm_up_end:
+        #     learning_factor = self.iter_step / self.warm_up_end
+        # else:
+        #     alpha = self.learning_rate_alpha
+        #     progress = (self.iter_step - self.warm_up_end) / (self.end_iter - self.warm_up_end)
+        #     learning_factor = (np.cos(np.pi * progress) + 1.0) * 0.5 * (1 - alpha) + alpha
+        # learning_factor *= scale_factor
+        learning_factor = 1
         current_learning_rate = self.learning_rate * learning_factor
         for g in self.optimizer.param_groups:
             if g['name'] in ['intrinsics_paras', 'poses_paras', 'depth_intrinsics_paras']:
@@ -581,8 +516,8 @@ class Runner:
                 'color_network_fine': self.color_network.state_dict(),
                 'optimizer': self.optimizer.state_dict(),
                 'iter_step': self.iter_step,
-                'deform_codes': self.deform_codes.data.cpu().numpy(),
-                'appearance_codes': self.appearance_codes.data.cpu().numpy(),
+                'deform_codes': self.deform_codes.state_dict(),
+                'appearance_codes': self.appearance_codes.state_dict(),
                 'depth_intrinsics_paras': depth_intrinsics_paras,
             }
             if self.is_paint == True:
@@ -620,9 +555,8 @@ class Runner:
         if idx < 0:
             idx = np.random.randint(dataset_val.n_images)
         # Deform
-        if self.use_deform:
-            deform_code = self.deform_codes[idx][None, ...]
-            appearance_code = self.appearance_codes[idx][None, ...]
+ 
+
         print('Validate: iter: {}, camera: {}'.format(self.iter_step, idx))
         if mode == 'train':
             batch_size = self.batch_size
@@ -631,20 +565,23 @@ class Runner:
 
         if resolution_level < 0:
             resolution_level = self.validate_resolution_level
-        rays_o, rays_d = dataset_val.gen_rays_at(idx, resolution_level=resolution_level)
+        rays_o, rays_d, time_id = dataset_val.gen_rays_at(idx, resolution_level=resolution_level)
         H, W, _ = rays_o.shape
+        time_ids = torch.ones((rays_o.reshape(-1, 3).shape[0],)).to(rays_o).long() * time_id
         rays_o = rays_o.reshape(-1, 3).split(batch_size)
         rays_d = rays_d.reshape(-1, 3).split(batch_size)
-
+        time_ids = time_ids.split(batch_size)
+        
         out_rgb_fine = []
         out_normal_fine = []
         out_depth_fine = []
 
-        for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
+        for rays_o_batch, rays_d_batch, time_id in zip(rays_o, rays_d, time_ids):
             near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch, self.hyper)
+
             if self.use_deform:
-                render_out = self.renderer.render(deform_code,
-                                                appearance_code,
+                render_out = self.renderer.render(time_id, self.deform_codes,
+                                                self.appearance_codes,
                                                 rays_o_batch,
                                                 rays_d_batch,
                                                 near,
@@ -670,13 +607,12 @@ class Runner:
                 else:
                     n_samples = self.renderer.n_samples
                 normals = render_out['gradients'] * render_out['weights'][:, :n_samples, None]
+
                 normals = normals.sum(dim=1).detach().cpu().numpy()
                 out_normal_fine.append(normals)
-            del render_out['depth_map'] # Annotate it if you want to visualize estimated depth map!
             if feasible('depth_map'):
                 out_depth_fine.append(render_out['depth_map'].detach().cpu().numpy())
             del render_out
-
         img_fine = None
         if len(out_rgb_fine) > 0:
             img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3, -1]) * 256).clip(0, 255)

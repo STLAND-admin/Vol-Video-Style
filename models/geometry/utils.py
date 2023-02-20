@@ -24,7 +24,7 @@ from tensorflow_graphics.geometry.representation.ray import (
     triangulate as ray_triangulate,
 )
 
-from dycheck.utils import types
+from models.utils import types
 
 
 def matmul(a: types.Array, b: types.Array) -> types.Array:
