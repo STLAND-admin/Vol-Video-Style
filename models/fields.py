@@ -231,11 +231,11 @@ class DeformNetwork_MLP(nn.Module):
         self.embed_fn_1 = None
 
         if multires > 0:
-            embed_fn, input_ch = get_embedder(multires, input_dims=dims_in)
+            embed_fn, input_ch, warp_em = get_embedder(multires, use_alpha = True, input_dims=dims_in)
             self.embed_fn_1 = embed_fn
             dims_in = input_ch
             dims[0] = input_ch + d_feature
-
+            self.warp_em = warp_em
         
 
         # latent code
@@ -248,7 +248,7 @@ class DeformNetwork_MLP(nn.Module):
     def forward(self, deformation_code, input_pts, alpha_ratio):
         batch_size = input_pts.shape[0]
         x = input_pts
-        x = self.embed_fn_1(x, alpha_ratio)
+        x = self.embed_fn_1(x)
         # x = torch.cat([deformation_code.repeat(x.shape[0],1), x], 1)
         x = torch.cat([deformation_code, x], 1)
         translate = self.deform(x)
@@ -566,7 +566,7 @@ class TopoNetwork(nn.Module):
         self.embed_fn_fine = None
 
         if multires > 0:
-            embed_fn, input_ch = get_embedder(multires, input_dims=d_in)
+            embed_fn, input_ch, _ = get_embedder(multires, input_dims=d_in)
             self.embed_fn_fine = embed_fn
             dims_in = input_ch
             dims[0] = input_ch + d_feature
@@ -582,33 +582,16 @@ class TopoNetwork(nn.Module):
 
             lin = nn.Linear(dims[l], out_dim)
 
-            if l == self.num_layers - 2:
-                torch.nn.init.normal_(lin.weight, mean=0.0, std=1e-5)
-                torch.nn.init.constant_(lin.bias, bias)
-            elif multires > 0 and l == 0:
-                torch.nn.init.constant_(lin.bias, 0.0)
-                torch.nn.init.constant_(lin.weight[:, d_in:], 0.0)
-                torch.nn.init.normal_(lin.weight[:, :d_in], 0.0, np.sqrt(2) / np.sqrt(out_dim))
-            elif multires > 0 and l in self.skip_in:
-                torch.nn.init.constant_(lin.bias, 0.0)
-                torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
-                torch.nn.init.constant_(lin.weight[:, -(dims_in - d_in):], 0.0)
-            else:
-                torch.nn.init.constant_(lin.bias, 0.0)
-                torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
-
-            if weight_norm:
-                lin = nn.utils.weight_norm(lin)
-
+            
             setattr(self, "lin" + str(l), lin)
         
-        self.activation = nn.Softplus(beta=100)
+        self.activation = nn.ReLU()
 
 
     def forward(self, deformation_code, input_pts, alpha_ratio):
         if self.embed_fn_fine is not None:
             # Anneal
-            input_pts = self.embed_fn_fine(input_pts, alpha_ratio)
+            input_pts = self.embed_fn_fine(input_pts)
         # x = torch.cat([input_pts, deformation_code.repeat(input_pts.shape[0],1)], dim=-1)
         x = torch.cat([input_pts, deformation_code], dim=-1)
 
@@ -926,6 +909,17 @@ class RenderingNetwork(nn.Module):
         if self.squeeze_out:
             x = torch.sigmoid(x)
         return x
+
+
+
+class SingleBetaNetwork(nn.Module):
+    def __init__(self, init_val):
+        super(SingleBetaNetwork, self).__init__()
+        ln_beta_init = np.log(init_val) 
+        self.ln_beta = nn.Parameter(data=torch.Tensor([ln_beta_init]), requires_grad=True)
+        
+    def forward(self,):
+        return   torch.exp(self.ln_beta)
 
 
 class SingleVarianceNetwork(nn.Module):

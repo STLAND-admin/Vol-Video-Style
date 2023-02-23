@@ -353,7 +353,7 @@ class Runner:
                         (geo_loss * self.geo_weight + angle_loss * self.angle_weight) * geo_scale# +\
                         # (mask_loss * self.mask_weight) * regular_scale
                 else:
-                    loss = color_fine_loss + eikonal_loss * self.igr_weight * 0.1#+\
+                    loss = color_fine_loss + eikonal_loss * self.igr_weight#+\
                         # ( mask_loss * self.mask_weight) * regular_scale
 
                 self.optimizer.zero_grad()
@@ -472,8 +472,8 @@ class Runner:
 
             self.deform_network.load_state_dict(checkpoint['deform_network'])
             self.topo_network.load_state_dict(checkpoint['topo_network'])
-            self.deform_codes = torch.from_numpy(checkpoint['deform_codes']).to(self.device).requires_grad_()
-            self.appearance_codes = torch.from_numpy(checkpoint['appearance_codes']).to(self.device).requires_grad_()
+            self.deform_codes.load_state_dict(checkpoint['deform_codes'])
+            self.appearance_codes.load_state_dict(checkpoint['appearance_codes'])
             logging.info('Use_deform True')
         if self.hyper==False:
             self.dataset.intrinsics_paras = torch.from_numpy(checkpoint['intrinsics_paras']).to(self.device)

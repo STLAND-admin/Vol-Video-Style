@@ -17,7 +17,8 @@ from models.renderer import NeuSRenderer, DeformNeRFRenderer
 from models.dataset_hyper import iPhoneDatasetFromAllFrames
 from torch.utils.data import DataLoader
 from models.NeRF import NerfMLP
-from models.schedule import * 
+
+
 class Runner:
     def __init__(self,dataset,  conf_path, mode='train', case='CASE_NAME', is_continue=False, is_paint = False, iswoab = False):
         self.device = torch.device('cuda')
@@ -111,9 +112,7 @@ class Runner:
         self.batch_size = self.conf.get_int('train.batch_size')
         self.validate_resolution_level = self.conf.get_int('train.validate_resolution_level')
         self.learning_rate = self.conf.get_float('train.learning_rate')
-        self.learning_rate_final_value = self.conf.get_float('train.learning_rate_final_value')
-        self.lr_num_steps = self.conf.get_float('train.lr_num_steps')
-
+        self.learning_rate_alpha = self.conf.get_float('train.learning_rate_alpha')
         self.warm_up_end = self.conf.get_float('train.warm_up_end', default=0.0)
         self.anneal_end = self.conf.get_float('train.anneal_end', default=0.0)
         self.test_batch_size = self.conf.get_int('test.test_batch_size')
@@ -259,15 +258,10 @@ class Runner:
                           num_workers=4,
                           generator=torch.Generator(device='cuda'),
                           shuffle=True)
-        self.expschedule = ExponentialSchedule(self.learning_rate, self.learning_rate_final_value, self.lr_num_steps)
-        self.warp_alpha_sch = LinearSchedule(self.conf.get_float('train.warp_alpha_initial_value'), self.conf.get_float('train.warp_alpha_final_value'), self.conf.get_float('train.warp_alpha_num_steps'))
-        self.ambient_alpha_sch = LinearSchedule(self.conf.get_float('train.ambient_alpha_initial_value'), self.conf.get_float('train.ambient_alpha_final_value'), self.conf.get_float('train.ambient_alpha_num_steps'), self.conf.get_float('train.ambient_alpha_start_iter'))
-
     def train(self):
         self.writer = SummaryWriter(log_dir=os.path.join(self.base_exp_dir, 'logs'))
         if self.is_paint == False:
             self.update_learning_rate()
-            self.update_alpha()
         res_step = self.end_iter - self.iter_step
         image_perm = self.get_image_perm()
         # self.validate_all_image(resolution_level=1)
@@ -301,7 +295,6 @@ class Runner:
 
                 appearance_code = self.appearance_codes#[time_id.long()][None, ...]
                 # Anneal
-                
                 alpha_ratio = max(min(self.iter_step/self.max_pe_iter, 1.), 0.)
                 near, far = self.dataset.near_far_from_sphere(rays_o, rays_d, self.hyper)
                 if self.mask_weight > 0.0:
@@ -326,25 +319,63 @@ class Runner:
                 color_error = (color_fine - true_rgb)  ** 2 * mask
                 color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum')/ (mask_sum * 3)
                 psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
+
                 # mask_loss = F.binary_cross_entropy(weight_sum.clip(1e-5, 1.0 - 1e-5), mask)
                 # Depth
-                loss = color_fine_loss #+\
+                if self.use_depth:
+                    depth_minus = (depth_map - rays_l) 
+                    depth_loss = F.l1_loss(depth_minus, torch.zeros_like(depth_minus), reduction='mean')
+                    if self.iter_step < self.important_begin_iter:
+                        rgb_scale = 0.1
+                        geo_scale = 10.0
+                        regular_scale = 10.0
+                        geo_loss = depth_loss
+                    elif self.iter_step < self.max_pe_iter:
+                        rgb_scale = 1.0
+                        geo_scale = 1.0
+                        regular_scale = 10.0
+                        geo_loss = 0.5 * depth_loss
+                    else:
+                        rgb_scale = 1.0
+                        geo_scale = 0.1
+                        regular_scale = 1.0
+                        geo_loss = 0.5 * depth_loss
+                else:
+                    if self.iter_step < self.max_pe_iter:
+                        regular_scale = 10.0
+                    else:
+                        regular_scale = 1.0
+                
+                if self.use_depth:
+                    loss = color_fine_loss * rgb_scale +\
+                        (geo_loss * self.geo_weight + angle_loss * self.angle_weight) * geo_scale# +\
+                        # (mask_loss * self.mask_weight) * regular_scale
+                else:
+                    loss = color_fine_loss #+\
                         # ( mask_loss * self.mask_weight) * regular_scale
 
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-                if self.iter_step % 500 == 0:
-                    self.writer.add_scalar('Loss/loss', loss, self.iter_step)
-                    self.writer.add_scalar('Loss/color_loss', color_fine_loss, self.iter_step)
-                    del color_fine_loss
-                    self.writer.add_scalar('Statistics/s_val', s_val.mean(), self.iter_step)
-                    self.writer.add_scalar('Statistics/weight_max', (weight_max * mask).sum() / mask_sum, self.iter_step)
-                    self.writer.add_scalar('Statistics/deform_codes',  list(self.deform_codes.parameters())[0].mean(), self.iter_step)
-                    self.writer.add_scalar('Statistics/psnr', psnr, self.iter_step)
-                    self.writer.add_scalar('Statistics/warp_alpha',  self.deform_network.warp_em.alpha.weights.item(), self.iter_step)
-                    self.writer.add_scalar('Statistics/amb_alpha', self.sdf_network.amb.alpha.weights.item(), self.iter_step)
-                    self.writer.add_scalar('Statistics/lr',  self.expschedule.get(self.iter_step), self.iter_step)
+
+                self.writer.add_scalar('Loss/loss', loss, self.iter_step)
+                self.writer.add_scalar('Loss/color_loss', color_fine_loss, self.iter_step)
+                del color_fine_loss
+                # Depth
+                if self.use_depth:
+                    self.writer.add_scalar('Loss/sdf_loss', sdf_loss, self.iter_step)
+                    self.writer.add_scalar('Loss/depth_loss', depth_loss, self.iter_step)
+                    self.writer.add_scalar('Loss/angle_loss', angle_loss, self.iter_step)
+                    del sdf_loss
+                    del depth_loss
+                    del angle_loss
+                # self.writer.add_scalar('Loss/mask_loss', mask_loss, self.iter_step)
+                # del mask_loss
+
+                self.writer.add_scalar('Statistics/s_val', s_val.mean(), self.iter_step)
+                self.writer.add_scalar('Statistics/weight_max', (weight_max * mask).sum() / mask_sum, self.iter_step)
+                self.writer.add_scalar('Statistics/deform_codes',  list(self.deform_codes.parameters())[0].mean(), self.iter_step)
+                self.writer.add_scalar('Statistics/psnr', psnr, self.iter_step)
                 # self.writer.add_scalar('Loss/parameters', list(self.color_network.parameters())[0].mean(), self.iter_step)
                 if self.iter_step % self.report_freq == 0:
                     print('The files have been saved in:', self.base_exp_dir)
@@ -373,7 +404,7 @@ class Runner:
                 #     self.validate_observation_mesh(self.validate_idx)
 
                 self.update_learning_rate()
-                self.update_alpha()
+                
                 if self.iter_step % len(image_perm) == 0:
                     image_perm = self.get_image_perm()
                 t.set_postfix(steps=self.iter_step, psnr=psnr.item())
@@ -394,16 +425,24 @@ class Runner:
 
 
     def update_learning_rate(self, scale_factor=1):
-        current_learning_rate = self.expschedule.get(self.iter_step)
+        # if self.iter_step < self.warm_up_end:
+        #     learning_factor = self.iter_step / self.warm_up_end
+        # else:
+        #     alpha = self.learning_rate_alpha
+        #     progress = (self.iter_step - self.warm_up_end) / (self.end_iter - self.warm_up_end)
+        #     learning_factor = (np.cos(np.pi * progress) + 1.0) * 0.5 * (1 - alpha) + alpha
+        # learning_factor *= scale_factor
+        learning_factor = 1
+        current_learning_rate = self.learning_rate * learning_factor
         for g in self.optimizer.param_groups:
-            g['lr'] = current_learning_rate
+            if g['name'] in ['intrinsics_paras', 'poses_paras', 'depth_intrinsics_paras']:
+                g['lr'] = current_learning_rate * 1e-1
+            elif self.iter_step >= self.max_pe_iter and g['name'] == 'deviation_network':
+                g['lr'] = current_learning_rate * 1.5
+            else:
+                g['lr'] = current_learning_rate
 
-    def update_alpha(self, scale_factor=1):
-        warp_alpha = self.warp_alpha_sch.get(self.iter_step)
-        self.deform_network.warp_em.alpha.weights = torch.tensor(warp_alpha).to(self.device)
-        amb_alpha = self.ambient_alpha_sch.get(self.iter_step)
-        self.sdf_network.amb.alpha.weights = torch.tensor(amb_alpha).to(self.device)
-        
+
     def file_backup(self):
         dir_lis = self.conf['general.recording']
         os.makedirs(os.path.join(self.base_exp_dir, 'recording'), exist_ok=True)

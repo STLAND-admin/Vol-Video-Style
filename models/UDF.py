@@ -7,7 +7,7 @@ from models.embedder import get_embedder
 from functools import partial
 
     
-class NerfMLP(nn.Module):
+class UDFMLP(nn.Module):
     """A simple MLP.
     Attributes:
         nerf_trunk_depth: int, the depth of the first part of MLP.
@@ -33,23 +33,23 @@ class NerfMLP(nn.Module):
                 skips=[4,],
                 alpha_brach_depth=1,
                 alpha_brach_width=128,
-                rgb_condition_dim = 0
+                rgb_condition_dim = 0,
                 ):
 
-        super(NerfMLP, self).__init__()
+        super(UDFMLP, self).__init__()
         input_ch_1 = d_in_1
         input_ch_2 = d_in_2
 
         self.in_ch = d_in_1 + d_in_2
         if multires > 0:
-            embed_fn, input_ch_1, _ = get_embedder(multires, input_dims=d_in_1)
+            embed_fn, input_ch_1 = get_embedder(multires, input_dims=d_in_1)
             self.embed_fn_fine = embed_fn
             self.in_ch += (input_ch_1 - d_in_1)
         if multires_topo > 0:
-            embed_amb_fn, input_ch_2, amb = get_embedder(multires_topo, use_input = False, use_alpha = True, input_dims=d_in_2)
+            embed_amb_fn, input_ch_2 = get_embedder(multires_topo, input_dims=d_in_2)
             self.embed_amb_fn = embed_amb_fn
             self.in_ch += (input_ch_2 - d_in_2)
-            self.amb = amb
+            
 
             
         self.trunk_depth = trunk_depth
@@ -63,8 +63,9 @@ class NerfMLP(nn.Module):
         self.rgb_condition_dim = rgb_condition_dim
         self.condition_density = False
         if skips is None:
-            self.skips = [4,]
-        self.skips = skips
+            self.skip_in = [4,]
+        else:
+            self.skip_in = skips
 
         self.hidden_activation = nn.ReLU()
 
@@ -74,21 +75,49 @@ class NerfMLP(nn.Module):
         self.rgb_activation = nn.Sigmoid()
 
         self.sigma_activation = nn.Identity()
+        dims = [self.in_ch] + [trunk_width for _ in range(trunk_depth)] + [1+self.trunk_width]
 
-        self.norm = norm
+        bias = 0.5
+        inside_outside=False 
+        self.num_layers = len(dims)
+        for l in range(0, self.num_layers - 1):
+            if l + 1 in self.skip_in:
+                out_dim = dims[l + 1] - dims[0]
+            else:
+                out_dim = dims[l + 1]
 
-        #todo check this
-        self.trunk_mlp = MLP(in_ch=self.in_ch,
-                            out_ch=self.trunk_width,
-                            depth=self.trunk_depth,
-                            width=self.trunk_width,
-                            hidden_activation=self.hidden_activation,
-                            skips=self.skips,
-                            output_activation=self.hidden_activation)
+            lin = nn.Linear(dims[l], out_dim)
+            if True:
+                if l == self.num_layers - 2:
+                    if not inside_outside:
+                        torch.nn.init.normal_(lin.weight, mean=np.sqrt(np.pi) / np.sqrt(dims[l]), std=0.0001)
+                        torch.nn.init.constant_(lin.bias, -bias)
+                    else:
+                        torch.nn.init.normal_(lin.weight, mean=-np.sqrt(np.pi) / np.sqrt(dims[l]), std=0.0001)
+                        torch.nn.init.constant_(lin.bias, bias)
+                elif multires > 0 and l == 0:
+                    torch.nn.init.constant_(lin.bias, 0.0)
+                    torch.nn.init.constant_(lin.weight[:, d_in_1:], 0.0)
+                    torch.nn.init.normal_(lin.weight[:, :d_in_1], 0.0, np.sqrt(2) / np.sqrt(out_dim))
+                elif l in self.skip_in:
+                    torch.nn.init.constant_(lin.bias, 0.0)
+                    torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
+                    if multires > 0:
+                        torch.nn.init.constant_(lin.weight[:, -(dims[0] - d_in_1):-input_ch_2], 0.0)
+                    if multires_topo > 0:
+                        torch.nn.init.constant_(lin.weight[:, -(input_ch_2 - d_in_2):], 0.0)
+                else:
+                    torch.nn.init.constant_(lin.bias, 0.0)
+                    torch.nn.init.normal_(lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim))
 
+            lin = nn.utils.weight_norm(lin)
+
+            setattr(self, "lin" + str(l), lin)
+
+        self.activation = nn.Softplus(beta=100)
         self.bottleneck_mlp = nn.Linear(self.trunk_width,self.trunk_width//2)#128
 
-        embed_rgb_fn, input_ch_3, _ = get_embedder(4, input_dims=3)
+        embed_rgb_fn, input_ch_3 = get_embedder(4, input_dims=3)
         self.embed_rgb_fn = embed_rgb_fn
         self.rgb_condition_dim += input_ch_3
         
@@ -127,29 +156,36 @@ class NerfMLP(nn.Module):
         """
         if self.embed_fn_fine is not None:
             # Anneal
-            input_pts = self.embed_fn_fine(x)
+            input_pts = self.embed_fn_fine(x, alpha_ratio)
         if self.embed_amb_fn is not None:
             # Anneal
-            topo_coord = self.embed_amb_fn(topo_coord)
+            topo_coord = self.embed_amb_fn(topo_coord, alpha_ratio)
         if self.embed_rgb_fn is not None:
-            rgb_embed = self.embed_rgb_fn(dirs_o)
+            rgb_embed = self.embed_rgb_fn(dirs_o, alpha_ratio)
         inputs = torch.cat([input_pts, topo_coord], dim=-1)
-        x = self.trunk_mlp(inputs)
-        # bottleneck = self.bottleneck_mlp(x)
-        bottleneck = self.bottleneck_mlp(x)
+        x = inputs
+        for l in range(0, self.num_layers - 1):
+            lin = getattr(self, "lin" + str(l))
+
+            if l in self.skip_in:
+                x = torch.cat([x, inputs], 1) / np.sqrt(2)
+
+            x = lin(x)
+
+            if l < self.num_layers - 2:
+                x = self.activation(x)        # bottleneck = self.bottleneck_mlp(x)
+        alpha = x[:, :1]
+        bottleneck = x[:, 1:]
+        bottleneck = self.bottleneck_mlp(bottleneck)
 
         # if alpha_condition is not None:
         #     # alpha_condition = self.broadcast_condition(alpha_condition,x.shape[1])
         #     alpha_condition = alpha_condition
         #     alpha_input = torch.cat([bottleneck,alpha_condition],dim=-1)
         # else:
-        alpha_input = bottleneck
 
-
-        alpha = self.alpha_mlp(alpha_input)
         rgb_condition = None
         if rgb_condition is not None:
-            # rgb_condition = self.broadcast_condition(rgb_condition,x.shape[1])
             rgb_input = torch.cat([bottleneck, rgb_condition, rgb_embed],dim=-1)
         else:
             rgb_input = torch.cat([bottleneck, rgb_embed],dim=-1)
