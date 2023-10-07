@@ -1,3 +1,4 @@
 exp/
 *.pth
 StyleFlow-Content-Fixed-I2I/
+.history/
