@@ -1,0 +1,107 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Exp_run_nerf",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--mode", "train",
+                "--conf", "./confs/hypernerf_nerf_mlp.conf",
+                "--case", "broom",
+                "--gpu", "6",
+                "--dataset","hypernerf",
+            ],
+            "env": {
+                "UNBUFFERED":"1"
+            }
+        },
+        {
+            "name": "Exp_run_style",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--mode", "style",
+                "--conf", "./confs/hypernerf_nerf_style.conf",
+                "--case", "broom",
+                "--gpu", "7",
+                //"--paint",
+                "--is_continue",
+                "--dataset","hypernerf",
+                "--style_num","14",
+            ],
+            "env": {
+                "UNBUFFERED":"1"
+            }
+        },
+        {
+            "name": "Exp_run_style_iphone",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--mode", "style",
+                "--conf", "./confs/iphone_nerf_mlp.conf",
+                "--case", "creeper",
+                "--gpu", "7",
+                //"--paint",
+                "--is_continue",
+                "--dataset","iphone",
+                "--style_num","14",
+            ],
+            "env": {
+                "UNBUFFERED":"1"
+            }
+        },
+        {
+            "name": "validation_Trained",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--mode", "validate",
+                "--conf", "./confs/hypernerf_nerf_mlp.conf",
+                "--case", "tail",
+                "--gpu", "6",
+                "--is_continue",
+                "--dataset","hypernerf",
+                "--style_num","48",
+                "--style_ckpt","/data0/styj/dyedit/exp/tail/result_deform_mlp_wodepth_style_NGPStyle/checkpoints/ckpt_0300000_styled14_21.pth"
+            ],
+            "env": {
+                "UNBUFFERED":"1"
+            }
+        },
+        {
+            "name": "Exp_run_nerf",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--mode", "train",
+                "--conf", "./confs/hypernerf_nerf_mlp.conf",
+                "--case", "toby-sit",
+                "--gpu", "6",
+                "--dataset","hypernerf",
+            ],
+            "env": {
+                "UNBUFFERED":"1"
+            }
+        },
+    ]
+}
