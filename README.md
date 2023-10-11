@@ -25,3 +25,6 @@ For vscode debug json example， exec on exp_runner_stylize_NGP.py
                 "UNBUFFERED":"1"
             }
         },
+
+
+Adopted from NDR
